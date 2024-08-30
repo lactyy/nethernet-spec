@@ -6,7 +6,7 @@ on LAN and Xbox Live games. It cannot currently be used over direct connections.
 
 The protocol is currently not very well documented, so this covers everything needed to implement it. Keep in mind that
 since this is a new protocol, it is subject to change at any time and thus this document may become outdated. All
-information here is from reverse engineering `v1.20.50` of the game.
+information here is from reverse engineering `v1.21.20` of the game.
 
 ## LAN discovery
 
@@ -83,7 +83,8 @@ The Xbox Live session directory on latest versions will return a `WebRTCNetworkI
     "ConnectionType": 3,
     "HostIpAddress": "",
     "HostPort": 0,
-    "WebRTCNetworkId": XXXXXXXXXXXXXXXXXXX
+    "WebRTCNetworkId": XXXXXXXXXXXXXXXXXXX,
+    "NetherNetId": XXXXXXXXXXXXXXXXXXX
   }
 ]
 ```
@@ -93,11 +94,36 @@ This WebRTC network ID is effectively the friend's session ID, used to connect t
 The connecting client takes this sender ID and establishes a WebSocket connection to
 `wss://signal.franchise.minecraft-services.net/ws/v1.0/signaling/XXXXXXXXXXXXXXXXXXX`, where the X's are the client's
 own session ID. This WebSocket is authenticated with the user's `MCToken`, which can be obtained from PlayFab. Keep in
-mind that this token must also have the treatment overrides to use this signaling server.
+mind that this token must be valid, and also have the treatment overrides to use this signaling server, otherwise an error
+with "Player not found." is returned when signaling a message into specific network ID.
 
 Once connected, the server immediately sends back credentials for STUN and TURN servers that can be used if needed.
 The client is then expected to set up their WebRTC client with these servers and then the WebRTC connection can be
 negotiated.
+
+The JSON messages sent in this WebSocket connection structures as follows:
+- `Type` (`int`)
+  * This is one of:
+    - `RequestType::Ping` (0x0)
+    - `RequestType::WebRTC` (0x1)
+    - `RequestType::TurnAuth` (0x2)
+- `Message` (`string`)
+  * If `Type` is `RequestType::Ping`, This will be omitted.
+  * If `Type` is `RequestType::WebRTC`, This is a signaling message which is described in [WebRTC negotiation](#webrtc-negotiation).
+  * If `Type` is `RequestType::TurnAuth`, This is another JSON data, which is structured as follows:
+    - `ExpirationInSeconds` (`int`)
+    - `TurnAuthServers` (`[]TurnAuthServer`)
+      * A list of TURN and STUN servers that can be used, which is structured as follows:
+        - `Username` (`string`)
+        - `Password` (`string`)
+        - `Urls` (`[]string`)
+- `To` (`uint64`)
+  * The network ID of remote connection. This is only present if sent from client.
+  * If `Type` is `RequestType::Ping`, This will be omitted.
+- `From` (`string`)
+  * The network ID of remote connection. This is only present if sent from server.
+  * If `Type` is `RequestType::TurnAuth`, This is always ``Server``.
+
 
 ## WebRTC negotiation
 Before the WebRTC connection is made, the details are negotiated with the messages sent either over the LAN
@@ -106,16 +132,46 @@ Before the WebRTC connection is made, the details are negotiated with the messag
 Each message is structured as follows:
 `MESSAGETYPE CONNECTIONID DATA`
 
-There are three message types used for WebRTC negotiation:
+There are four message types used for WebRTC negotiation:
 - `CONNECTREQUEST`
 - `CONNECTRESPONSE`
 - `CANDIDATEADD`
+- `CONNECTERROR`
 
 The connection ID is a unique ID for each connection.
 
 `CONNECTREQUEST` just contains the SDP offer from the client. The server responds with a `CONNECTRESPONSE` containing
 the SDP answer. After that, the client sends `CANDIDATEADD` messages with its ICE candidates. Once it has sent around
 three, the server will send it's own candidates and the connection will attempt to be established.
+
+`CONNECTERROR` contains the code of the error occurred in the connection. This is one of:
+- None (`0x00`)
+- DestinationNotLoggedIn (`0x01`)
+- NegotiationTimeout (`0x02`)
+- WrongTransportVersion (`0x03`)
+- FailedToCreatePeerConnection (`0x04`)
+- ICE (`0x05`)
+- ConnectRequest (`0x06`)
+- ConnectResponse (`0x07`)
+- CandidateAdd (`0x8`)
+- InactivityTimeout (`0x9`)
+- FailedToCreateOffer (`0x0a`)
+- FailedToCreateAnswer (`0x0b`)
+- FailedToSetLocalDescription (`0x0c`)
+- FailedToSetRemoteDescription (`0x0d`)
+- NegotiationTimeoutWaitingForResponse (`0x0e`)
+- NegotiationTimeoutWaitingForAccept (`0x0f`)
+- IncomingConnectionIgnored (`0x10`)
+- SignalingParsingFailure (`0x11`)
+- SignalingUnknownError (`0x12`)
+- SignalingUnicastMessageDeliveryFailed (`0x13`)
+- SignalingBroadcastDeliveryFailed (`0x15`)
+- SignalingMessageDeliveryFailed (`0x16`)
+- SignalingTurnAuthFailed (`0x16`)
+- SignalingFallbackToBestEffortDelivery (`0x17`)
+- NoSignalingChannel (`0x18`)
+- NotLoggedIn (`0x19`)
+- SignalingFailedToSend (`0x1a`)
 
 In NetherNet, the client connecting will act as the ICE controller, and the server will act as the ICE agent.
 
@@ -180,7 +236,7 @@ client will create two data channels:
 - `UnreliableDataChannel`
 
 Packets themselves are encoded the same as they would be over RakNet, except:
-- Packets are not batched; they are sent individually.
+- Packets are left unencrypted even after a handshake packet.
 - If a packet exceeds `10,000` bytes, it is split into multiple packets.
 
 To expand on the second point, each SCTP message is structured in the following way:
